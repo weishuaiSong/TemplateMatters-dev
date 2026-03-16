@@ -21,6 +21,9 @@ imageqa_models = {
 	"qwen3vl"  : ("Qwen3VL", "Qwen/Qwen3-VL-8B-Instruct"),
     "qwenvl-chat": ("QwenVLChat", "Qwen/Qwen-VL-Chat"),
     "internvl-chat-v1.5": ("InternVLChat", 'failspy/InternVL-Chat-V1-5-quantable'),
+    "internvl2.5-8b": ("InternVLChat", "OpenGVLab/InternVL2_5-8B"),
+    "internvl3-8b": ("InternVLHF", "OpenGVLab/InternVL3-8B-hf"),
+    "internvl3-8b-chat": ("InternVLChat", "OpenGVLab/InternVL3-8B"),
     "idefics2-8b": ("IDEFICS2", "HuggingFaceM4/idefics2-8b"),
 
     "llavav1.5-7b-10-templated": ('LLaVA', "/mnt/ali-sh-1/usr/tusen/tmp-dev/shijian/template-scaling/LLaVA/checkpoints/hf_models/llava-v1.5-7b-lora-10-templated"),
@@ -590,39 +593,85 @@ class QwenVLChat(QAModelInstance):
 
 
 class InternVLChat(QAModelInstance):
-    def __init__(self, ckpt="OpenGVLab/InternVL-Chat-V1-5", torch_device=torch.device("cuda"), model_precision=torch.float32):
+    """支持 InternVL-Chat-V1.5 / InternVL2_5-8B / InternVL3-8B 等，统一 chat(pixel_values, prompt) 接口。"""
+    def __init__(self, ckpt="OpenGVLab/InternVL-Chat-V1-5", torch_device=torch.device("cuda"), model_precision=torch.bfloat16):
         from transformers import AutoTokenizer, AutoModel
-        # Required a 80GB A100. current not support multi gpus now, internvl's bug.
-        self.model = AutoModel.from_pretrained(
-            ckpt,
-            torch_dtype=torch.bfloat16,
+        model_kwargs = dict(
+            torch_dtype=model_precision,
             low_cpu_mem_usage=True,
             trust_remote_code=True,
-            device_map='auto').eval()
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            ckpt, trust_remote_code=True)
+            device_map="auto",
+        )
+        # InternVL2.5 / 3 推荐 use_flash_attn
+        if "InternVL2" in ckpt or "InternVL3" in ckpt:
+            model_kwargs["use_flash_attn"] = True
+        self.model = AutoModel.from_pretrained(ckpt, **model_kwargs).eval()
+        self.tokenizer = AutoTokenizer.from_pretrained(ckpt, trust_remote_code=True, use_fast=False)
+        self._max_num = 12 if ("InternVL2" in ckpt or "InternVL3" in ckpt) else 6
 
     def qa(self, image, prompt):
         if isinstance(image, Image.Image):
-            # Check if the image is a PIL.Image object and save to a temporary file if so
             with tempfile.NamedTemporaryFile(delete=True, suffix=".png") as tmp:
                 image.save(tmp.name)
                 image_path = tmp.name
-                pixel_values = load_image(
-                    image_path, max_num=6).to(torch.bfloat16).cuda()
+                pixel_values = load_image(image_path, max_num=self._max_num).to(torch.bfloat16).cuda()
         else:
-            pixel_values = load_image(
-                image, max_num=6).to(torch.bfloat16).cuda()
+            pixel_values = load_image(image, max_num=self._max_num).to(torch.bfloat16).cuda()
 
         generation_config = dict(
             num_beams=1,
             max_new_tokens=512,
             do_sample=False,
         )
-
         response = self.model.chat(
             self.tokenizer, pixel_values, prompt, generation_config)
-        return response
+        return response, 0
+
+
+class InternVLHF(QAModelInstance):
+    """HF 原生 InternVL（AutoProcessor + AutoModelForImageTextToText），支持 apply_chat_template 与 POSIX logprob。"""
+    def __init__(
+        self,
+        ckpt="OpenGVLab/InternVL3-8B-hf",
+        torch_device="cuda",
+        model_precision=torch.bfloat16,
+    ):
+        from transformers import AutoProcessor, AutoModelForImageTextToText
+
+        self.processor = AutoProcessor.from_pretrained(ckpt, trust_remote_code=True)
+        self.model = AutoModelForImageTextToText.from_pretrained(
+            ckpt,
+            device_map=torch_device,
+            torch_dtype=model_precision,
+            trust_remote_code=True,
+        ).eval()
+
+    def qa(self, image, prompt):
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": image},
+                    {"type": "text", "text": prompt},
+                ],
+            }
+        ]
+        inputs = self.processor.apply_chat_template(
+            messages,
+            add_generation_prompt=True,
+            tokenize=True,
+            return_dict=True,
+            return_tensors="pt",
+        ).to(self.model.device, dtype=next(self.model.parameters()).dtype)
+
+        generated_ids = self.model.generate(**inputs, max_new_tokens=512, do_sample=False)
+        generated_ids_trimmed = generated_ids[:, inputs["input_ids"].shape[1]:]
+        answer = self.processor.batch_decode(
+            generated_ids_trimmed,
+            skip_special_tokens=True,
+            clean_up_tokenization_spaces=False,
+        )[0].strip()
+        return answer, 0
 
 
 class IDEFICS2(QAModelInstance):
