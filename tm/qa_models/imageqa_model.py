@@ -21,8 +21,9 @@ imageqa_models = {
 	"qwen3vl"  : ("Qwen3VL", "Qwen/Qwen3-VL-8B-Instruct"),
     "qwenvl-chat": ("QwenVLChat", "Qwen/Qwen-VL-Chat"),
     "internvl-chat-v1.5": ("InternVLChat", 'failspy/InternVL-Chat-V1-5-quantable'),
-    "internvl2.5-8b": ("InternVLHF", "OpenGVLab/InternVL2_5-8B"),
-    "internvl2.5-8b-chat": ("InternVLChat", "OpenGVLab/InternVL2_5-8B"),
+    # InternVL2.5 目前为 OpenGVLab remote-code 的 InternVLChatConfig（非 InternVLConfig），不能用 AutoModelForImageTextToText；
+    # POSIX 通过 InternVLChat.logprob_of_response 的 teacher-forcing forward 计算。
+    "internvl2.5-8b": ("InternVLChat", "OpenGVLab/InternVL2_5-8B"),
     "internvl3-8b": ("InternVLHF", "OpenGVLab/InternVL3-8B-hf"),
     "internvl3-8b-chat": ("InternVLChat", "OpenGVLab/InternVL3-8B"),
     "idefics2-8b": ("IDEFICS2", "HuggingFaceM4/idefics2-8b"),
@@ -594,7 +595,8 @@ class QwenVLChat(QAModelInstance):
 
 
 class InternVLChat(QAModelInstance):
-    """支持 InternVL-Chat-V1.5 / InternVL2_5-8B / InternVL3-8B 等，统一 chat(pixel_values, prompt) 接口。"""
+    """InternVL 官方用法：AutoModel + model.chat(tokenizer, pixel_values, question, generation_config)。
+    见 https://huggingface.co/OpenGVLab/InternVL2_5-8B Quick Start：仅给出 AutoModel/AutoTokenizer + chat()，无 AutoProcessor。"""
     def __init__(self, ckpt="OpenGVLab/InternVL-Chat-V1-5", torch_device=torch.device("cuda"), model_precision=torch.bfloat16):
         from transformers import AutoTokenizer, AutoModel
         model_kwargs = dict(
@@ -635,6 +637,7 @@ class InternVLChat(QAModelInstance):
             pass
 
     def qa(self, image, prompt):
+        # 与官方一致：load_image -> pixel_values，question = '<image>\n' + prompt，model.chat(...)
         if isinstance(image, Image.Image):
             with tempfile.NamedTemporaryFile(delete=True, suffix=".png") as tmp:
                 image.save(tmp.name)
@@ -643,13 +646,14 @@ class InternVLChat(QAModelInstance):
         else:
             pixel_values = load_image(image, max_num=self._max_num).to(torch.bfloat16).cuda()
 
+        question = "<image>\n" + prompt
         generation_config = dict(
             num_beams=1,
             max_new_tokens=512,
             do_sample=False,
         )
         response = self.model.chat(
-            self.tokenizer, pixel_values, prompt, generation_config)
+            self.tokenizer, pixel_values, question, generation_config)
         return response, 0
 
     def _build_internvl_query(self, question: str, num_patches: int) -> str:
