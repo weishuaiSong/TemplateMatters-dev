@@ -9,7 +9,9 @@ import torch
 # Qwen-style 模型使用 messages + process_vision_info + apply_chat_template 做 logprob 打分
 QWEN_STYLE_MODELS = {"qwenvl", "qwen2.5vl", "qwen2.5omni", "qwen3vl", "qwenvl-chat"}
 # InternVL：HF 版本有 processor（可算 POSIX），chat 版本无 processor（仅准确率）
-INTERNVL_STYLE_MODELS = {"internvl-chat-v1.5", "internvl2.5-8b", "internvl3-8b"}
+INTERNVL_STYLE_MODELS = {"internvl-chat-v1.5", "internvl2.5-8b", "internvl3-8b", "molmo2-8b"}
+# Molmo 7B-D：使用 processor.process(images, text)，需单独 logprob 路径
+MOLMO_STYLE_MODELS = {"molmo-7b-d-0924"}
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--model_name", type=str, default="llavav1.5-7b", help="Model name to load")
@@ -30,6 +32,7 @@ dataset = SingleImageQADataset(args.dataset_name).get_dataset()
 results = []
 use_qwen_style = args.model_name in QWEN_STYLE_MODELS
 use_internvl_style = args.model_name in INTERNVL_STYLE_MODELS
+use_molmo_style = args.model_name in MOLMO_STYLE_MODELS
 
 for item in tqdm(dataset, desc="Processing dataset"):
     question = item["question"]
@@ -134,6 +137,41 @@ for item in tqdm(dataset, desc="Processing dataset"):
             prompt_i = build_prompt_func(templates[i])(question, choices)
             for j in range(N):
                 row.append(vqa_model.model.logprob_of_response(image=image, prompt=prompt_i, response=responses[j]))
+            logprob_matrix.append(row)
+    elif use_molmo_style:
+        # Molmo 7B-D：processor.process(images, text)，teacher-forcing 计算 logprob
+        processor = vqa_model.model.processor
+        model = vqa_model.model.model
+        _device = next(model.parameters()).device
+        molmo_image = image.convert("RGB") if hasattr(image, "mode") and image.mode != "RGB" else image
+
+        for i in tqdm(range(N), desc="Scoring templates", leave=False):
+            row = []
+            prompt_i = build_prompt_func(templates[i])(question, choices)
+            prompt_inputs = processor.process(images=[molmo_image], text=prompt_i)
+            prompt_inputs = {k: (v.to(_device).unsqueeze(0) if v is not None else v) for k, v in prompt_inputs.items()}
+            prompt_length = prompt_inputs["input_ids"].shape[1]
+
+            for j in range(N):
+                response_j = responses[j].strip()
+                full_text = prompt_i + response_j
+                inputs = processor.process(images=[molmo_image], text=full_text)
+                inputs = {k: (v.to(_device).unsqueeze(0) if v is not None else v) for k, v in inputs.items()}
+                seq_len = inputs["input_ids"].shape[1]
+                if seq_len <= prompt_length:
+                    print("WARNING: no response tokens detected! prompt_len:", prompt_length, "full_len:", seq_len)
+
+                model_kwargs = {k: v for k, v in inputs.items() if v is not None}
+                with torch.no_grad():
+                    outputs = model(**model_kwargs)
+                log_probs = torch.log_softmax(outputs.logits, dim=-1)[0]
+                total_log_prob = 0.0
+                for k in range(seq_len - prompt_length):
+                    pred_pos = prompt_length + k - 1
+                    token_pos = prompt_length + k
+                    token_id = inputs["input_ids"][0, token_pos].item()
+                    total_log_prob += log_probs[pred_pos, token_id].item()
+                row.append(total_log_prob)
             logprob_matrix.append(row)
     elif use_qwen_style:
         from qwen_vl_utils import process_vision_info

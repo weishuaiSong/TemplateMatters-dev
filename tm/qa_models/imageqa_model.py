@@ -26,6 +26,8 @@ imageqa_models = {
     "internvl2.5-8b": ("InternVLChat", "OpenGVLab/InternVL2_5-8B"),
     "internvl3-8b": ("InternVLChat", "OpenGVLab/InternVL3-8B"),
     "idefics2-8b": ("IDEFICS2", "HuggingFaceM4/idefics2-8b"),
+    "molmo-7b-d-0924": ("Molmo", "allenai/Molmo-7B-D-0924"),
+    "molmo2-8b": ("Molmo2", "allenai/Molmo2-8B"),
 
     "llavav1.5-7b-10-templated": ('LLaVA', "/mnt/ali-sh-1/usr/tusen/tmp-dev/shijian/template-scaling/LLaVA/checkpoints/hf_models/llava-v1.5-7b-lora-10-templated"),
     "llavav1.5-7b-100-templated": ('LLaVA', "shijianS01/llava-v1.5-7b-lora-100-templated"),
@@ -767,6 +769,102 @@ class InternVLHF(QAModelInstance):
             clean_up_tokenization_spaces=False,
         )[0].strip()
         return answer, 0
+
+
+class Molmo2(QAModelInstance):
+    """Molmo2 视觉语言模型（如 Molmo2-8B），基于 Qwen3，使用 AutoProcessor + AutoModelForImageTextToText。"""
+    def __init__(
+        self,
+        ckpt="allenai/Molmo2-8B",
+        torch_device="cuda",
+        model_precision=torch.bfloat16,
+    ):
+        from transformers import AutoProcessor, AutoModelForImageTextToText
+
+        self.processor = AutoProcessor.from_pretrained(
+            ckpt,
+            trust_remote_code=True,
+        )
+        self.model = AutoModelForImageTextToText.from_pretrained(
+            ckpt,
+            device_map=torch_device,
+            torch_dtype=model_precision,
+            trust_remote_code=True,
+        ).eval()
+
+    def qa(self, image, prompt):
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": image},
+                    {"type": "text", "text": prompt},
+                ],
+            }
+        ]
+        inputs = self.processor.apply_chat_template(
+            messages,
+            add_generation_prompt=True,
+            tokenize=True,
+            return_dict=True,
+            return_tensors="pt",
+        ).to(self.model.device, dtype=next(self.model.parameters()).dtype)
+
+        generated_ids = self.model.generate(**inputs, max_new_tokens=512, do_sample=False)
+        generated_ids_trimmed = generated_ids[:, inputs["input_ids"].shape[1]:]
+        answer = self.processor.batch_decode(
+            generated_ids_trimmed,
+            skip_special_tokens=True,
+            clean_up_tokenization_spaces=False,
+        )[0].strip()
+        return answer, 1
+
+
+class Molmo(QAModelInstance):
+    """Molmo 7B-D 视觉语言模型，使用 processor.process(images, text) + generate_from_batch。"""
+    def __init__(
+        self,
+        ckpt="allenai/Molmo-7B-D-0924",
+        torch_device="cuda",
+        model_precision=torch.bfloat16,
+    ):
+        from transformers import AutoModelForCausalLM, AutoProcessor, GenerationConfig
+
+        self.processor = AutoProcessor.from_pretrained(
+            ckpt,
+            trust_remote_code=True,
+        )
+        self.model = AutoModelForCausalLM.from_pretrained(
+            ckpt,
+            device_map=torch_device,
+            torch_dtype=model_precision,
+            trust_remote_code=True,
+        ).eval()
+        self.model.generation_config = GenerationConfig.from_pretrained(
+            ckpt, trust_remote_code=True
+        )
+
+    def qa(self, image, prompt):
+        if isinstance(image, Image.Image) and image.mode != "RGB":
+            image = image.convert("RGB")
+        inputs = self.processor.process(
+            images=[image],
+            text=prompt,
+        )
+        inputs = {k: v.to(self.model.device).unsqueeze(0) for k, v in inputs.items()}
+        gen_config = self.model.generation_config
+        gen_config.max_new_tokens = 512
+        gen_config.use_cache = True
+        output = self.model.generate_from_batch(
+            inputs,
+            generation_config=gen_config,
+            tokenizer=self.processor.tokenizer,
+        )
+        generated_tokens = output[0, inputs["input_ids"].size(1):]
+        answer = self.processor.tokenizer.decode(
+            generated_tokens, skip_special_tokens=True
+        ).strip()
+        return answer, 1
 
 
 class IDEFICS2(QAModelInstance):
