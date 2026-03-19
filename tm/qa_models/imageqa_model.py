@@ -28,6 +28,8 @@ imageqa_models = {
     "idefics2-8b": ("IDEFICS2", "HuggingFaceM4/idefics2-8b"),
     "molmo-7b-d-0924": ("Molmo", "allenai/Molmo-7B-D-0924"),
     "molmo2-8b": ("Molmo2", "allenai/Molmo2-8B"),
+    "llava-onevision-qwen2-7b-ov-hf": ("LlavaOnevision", "llava-hf/llava-onevision-qwen2-7b-ov-hf"),
+    "llava-onevision-1.5-8b-instruct": ("LLaVAOneVision15", "lmms-lab/LLaVA-OneVision-1.5-8B-Instruct"),
 
     "llavav1.5-7b-10-templated": ('LLaVA', "/mnt/ali-sh-1/usr/tusen/tmp-dev/shijian/template-scaling/LLaVA/checkpoints/hf_models/llava-v1.5-7b-lora-10-templated"),
     "llavav1.5-7b-100-templated": ('LLaVA', "shijianS01/llava-v1.5-7b-lora-100-templated"),
@@ -769,6 +771,112 @@ class InternVLHF(QAModelInstance):
             clean_up_tokenization_spaces=False,
         )[0].strip()
         return answer, 0
+
+
+class LlavaOnevision(QAModelInstance):
+    """LLaVA-OneVision Qwen2 模型，使用 LlavaOnevisionForConditionalGeneration + apply_chat_template。"""
+    def __init__(
+        self,
+        ckpt="llava-hf/llava-onevision-qwen2-7b-ov-hf",
+        torch_device="cuda",
+        model_precision=torch.bfloat16,
+    ):
+        from transformers import AutoProcessor, LlavaOnevisionForConditionalGeneration
+
+        self.processor = AutoProcessor.from_pretrained(ckpt)
+        self.model = LlavaOnevisionForConditionalGeneration.from_pretrained(
+            ckpt,
+            torch_dtype=model_precision,
+            low_cpu_mem_usage=True,
+            device_map=torch_device,
+        ).eval()
+
+    def qa(self, image, prompt):
+        if isinstance(image, Image.Image) and image.mode != "RGB":
+            image = image.convert("RGB")
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": image},
+                    {"type": "text", "text": prompt},
+                ],
+            }
+        ]
+        prompt_text = self.processor.apply_chat_template(
+            messages,
+            add_generation_prompt=True,
+            tokenize=False,
+        )
+        inputs = self.processor(
+            images=image,
+            text=prompt_text,
+            return_tensors="pt",
+        ).to(self.model.device, dtype=next(self.model.parameters()).dtype)
+        generated_ids = self.model.generate(**inputs, max_new_tokens=512, do_sample=False)
+        generated_ids_trimmed = generated_ids[:, inputs["input_ids"].shape[1]:]
+        answer = self.processor.decode(
+            generated_ids_trimmed[0],
+            skip_special_tokens=True,
+            clean_up_tokenization_spaces=False,
+        ).strip()
+        return answer, 1
+
+
+class LLaVAOneVision15(QAModelInstance):
+    """LLaVA-OneVision-1.5 模型，使用 qwen_vl_utils.process_vision_info（Qwen 风格）。"""
+    def __init__(
+        self,
+        ckpt="lmms-lab/LLaVA-OneVision-1.5-8B-Instruct",
+        torch_device="cuda",
+        model_precision=torch.bfloat16,
+    ):
+        from transformers import AutoProcessor, AutoModelForCausalLM
+
+        self.processor = AutoProcessor.from_pretrained(ckpt, trust_remote_code=True)
+        self.model = AutoModelForCausalLM.from_pretrained(
+            ckpt,
+            torch_dtype=model_precision,
+            device_map=torch_device,
+            trust_remote_code=True,
+        ).eval()
+
+    def qa(self, image, prompt):
+        from qwen_vl_utils import process_vision_info
+
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": image},
+                    {"type": "text", "text": prompt},
+                ],
+            }
+        ]
+        text = self.processor.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+        image_inputs, video_inputs = process_vision_info(messages)
+        inputs = self.processor(
+            text=[text],
+            images=image_inputs,
+            videos=video_inputs,
+            padding=True,
+            return_tensors="pt",
+        ).to(self.model.device)
+
+        generated_ids = self.model.generate(**inputs, max_new_tokens=512, do_sample=False)
+        generated_ids_trimmed = [
+            out_ids[len(in_ids):] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)
+        ]
+        answer = self.processor.batch_decode(
+            generated_ids_trimmed,
+            skip_special_tokens=True,
+            clean_up_tokenization_spaces=False,
+        )[0].strip()
+        return answer, 1
 
 
 class Molmo2(QAModelInstance):

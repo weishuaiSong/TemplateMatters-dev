@@ -7,11 +7,13 @@ import argparse
 import torch
 
 # Qwen-style 模型使用 messages + process_vision_info + apply_chat_template 做 logprob 打分
-QWEN_STYLE_MODELS = {"qwenvl", "qwen2.5vl", "qwen2.5omni", "qwen3vl", "qwenvl-chat"}
+QWEN_STYLE_MODELS = {"qwenvl", "qwen2.5vl", "qwen2.5omni", "qwen3vl", "qwenvl-chat", "llava-onevision-1.5-8b-instruct"}
 # InternVL：HF 版本有 processor（可算 POSIX），chat 版本无 processor（仅准确率）
 INTERNVL_STYLE_MODELS = {"internvl-chat-v1.5", "internvl2.5-8b", "internvl3-8b", "molmo2-8b"}
 # Molmo 7B-D：使用 processor.process(images, text)，需单独 logprob 路径
 MOLMO_STYLE_MODELS = {"molmo-7b-d-0924"}
+# LLaVA-OneVision Qwen2：使用 apply_chat_template + processor(images, text)，与 InternVL HF 类似的 tokenize 路径
+LLAVA_ONEVISION_STYLE_MODELS = {"llava-onevision-qwen2-7b-ov-hf"}
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--model_name", type=str, default="llavav1.5-7b", help="Model name to load")
@@ -33,6 +35,7 @@ results = []
 use_qwen_style = args.model_name in QWEN_STYLE_MODELS
 use_internvl_style = args.model_name in INTERNVL_STYLE_MODELS
 use_molmo_style = args.model_name in MOLMO_STYLE_MODELS
+use_llava_onevision_style = args.model_name in LLAVA_ONEVISION_STYLE_MODELS
 
 for item in tqdm(dataset, desc="Processing dataset"):
     question = item["question"]
@@ -157,6 +160,60 @@ for item in tqdm(dataset, desc="Processing dataset"):
                 full_text = prompt_i + response_j
                 inputs = processor.process(images=[molmo_image], text=full_text)
                 inputs = {k: (v.to(_device).unsqueeze(0) if v is not None else v) for k, v in inputs.items()}
+                seq_len = inputs["input_ids"].shape[1]
+                if seq_len <= prompt_length:
+                    print("WARNING: no response tokens detected! prompt_len:", prompt_length, "full_len:", seq_len)
+
+                model_kwargs = {k: v for k, v in inputs.items() if v is not None}
+                with torch.no_grad():
+                    outputs = model(**model_kwargs)
+                log_probs = torch.log_softmax(outputs.logits, dim=-1)[0]
+                total_log_prob = 0.0
+                for k in range(seq_len - prompt_length):
+                    pred_pos = prompt_length + k - 1
+                    token_pos = prompt_length + k
+                    token_id = inputs["input_ids"][0, token_pos].item()
+                    total_log_prob += log_probs[pred_pos, token_id].item()
+                row.append(total_log_prob)
+            logprob_matrix.append(row)
+    elif use_llava_onevision_style:
+        # LLaVA-OneVision Qwen2：apply_chat_template + processor(images, text)
+        processor = vqa_model.model.processor
+        model = vqa_model.model.model
+        _device = next(model.parameters()).device
+        _dtype = next(model.parameters()).dtype
+        llava_ov_image = image.convert("RGB") if hasattr(image, "mode") and image.mode != "RGB" else image
+
+        for i in tqdm(range(N), desc="Scoring templates", leave=False):
+            row = []
+            prompt_i = build_prompt_func(templates[i])(question, choices)
+            messages_prompt = [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image", "image": llava_ov_image},
+                        {"type": "text", "text": prompt_i},
+                    ],
+                }
+            ]
+            prompt_text = processor.apply_chat_template(
+                messages_prompt,
+                add_generation_prompt=True,
+                tokenize=False,
+            )
+            prompt_inputs = processor(images=llava_ov_image, text=prompt_text, return_tensors="pt")
+            prompt_inputs = {k: (v.to(_device) if v is not None else v) for k, v in prompt_inputs.items()}
+            if "pixel_values" in prompt_inputs and prompt_inputs["pixel_values"] is not None:
+                prompt_inputs["pixel_values"] = prompt_inputs["pixel_values"].to(_dtype)
+            prompt_length = prompt_inputs["input_ids"].shape[1]
+
+            for j in range(N):
+                response_j = responses[j].strip()
+                full_text = prompt_text + response_j
+                inputs = processor(images=llava_ov_image, text=full_text, return_tensors="pt")
+                inputs = {k: (v.to(_device) if v is not None else v) for k, v in inputs.items()}
+                if "pixel_values" in inputs and inputs["pixel_values"] is not None:
+                    inputs["pixel_values"] = inputs["pixel_values"].to(_dtype)
                 seq_len = inputs["input_ids"].shape[1]
                 if seq_len <= prompt_length:
                     print("WARNING: no response tokens detected! prompt_len:", prompt_length, "full_len:", seq_len)
