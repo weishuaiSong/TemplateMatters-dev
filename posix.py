@@ -9,7 +9,7 @@ import torch
 # Qwen-style 模型使用 messages + process_vision_info + apply_chat_template 做 logprob 打分
 QWEN_STYLE_MODELS = {"qwenvl", "qwen2.5vl", "qwen2.5omni", "qwen3vl", "qwenvl-chat"}
 # InternVL：HF 版本有 processor（可算 POSIX），chat 版本无 processor（仅准确率）
-INTERNVL_STYLE_MODELS = {"internvl-chat-v1.5", "internvl2.5-8b", "internvl2.5-8b-chat", "internvl3-8b", "internvl3-8b-chat"}
+INTERNVL_STYLE_MODELS = {"internvl-chat-v1.5", "internvl2.5-8b", "internvl3-8b"}
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--model_name", type=str, default="llavav1.5-7b", help="Model name to load")

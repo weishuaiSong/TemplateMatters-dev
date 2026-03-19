@@ -24,8 +24,7 @@ imageqa_models = {
     # InternVL2.5 目前为 OpenGVLab remote-code 的 InternVLChatConfig（非 InternVLConfig），不能用 AutoModelForImageTextToText；
     # POSIX 通过 InternVLChat.logprob_of_response 的 teacher-forcing forward 计算。
     "internvl2.5-8b": ("InternVLChat", "OpenGVLab/InternVL2_5-8B"),
-    "internvl3-8b": ("InternVLHF", "OpenGVLab/InternVL3-8B-hf"),
-    "internvl3-8b-chat": ("InternVLChat", "OpenGVLab/InternVL3-8B"),
+    "internvl3-8b": ("InternVLChat", "OpenGVLab/InternVL3-8B"),
     "idefics2-8b": ("IDEFICS2", "HuggingFaceM4/idefics2-8b"),
 
     "llavav1.5-7b-10-templated": ('LLaVA', "/mnt/ali-sh-1/usr/tusen/tmp-dev/shijian/template-scaling/LLaVA/checkpoints/hf_models/llava-v1.5-7b-lora-10-templated"),
