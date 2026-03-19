@@ -609,6 +609,18 @@ class InternVLChat(QAModelInstance):
         self.tokenizer = AutoTokenizer.from_pretrained(ckpt, trust_remote_code=True, use_fast=False)
         self._max_num = 12 if ("InternVL2" in ckpt or "InternVL3" in ckpt) else 6
 
+        # 兼容部分环境下 InternLM2ForCausalLM 缺少 generate() 的问题：
+        # OpenGVLab 的 remote code 在 chat() 内部会调用 self.language_model.generate(...)
+        # 若 transformers 版本/基类不含该方法，这里动态绑定 GenerationMixin.generate。
+        try:
+            from transformers.generation.utils import GenerationMixin
+            lm = getattr(self.model, "language_model", None)
+            if lm is not None and not hasattr(lm, "generate"):
+                lm.generate = GenerationMixin.generate.__get__(lm, lm.__class__)
+        except Exception:
+            # 若 generation utils 不可用，则保持原状，让上层报错提示升级 transformers
+            pass
+
     def qa(self, image, prompt):
         if isinstance(image, Image.Image):
             with tempfile.NamedTemporaryFile(delete=True, suffix=".png") as tmp:
