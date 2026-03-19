@@ -128,8 +128,13 @@ for item in tqdm(dataset, desc="Processing dataset"):
                 row.append(total_log_prob)
             logprob_matrix.append(row)
     elif use_internvl_style:
-        # InternVL chat 版（无 processor），不计算 logprob 矩阵
-        logprob_matrix = [[0.0] * N for _ in range(N)]
+        # InternVL chat 版（OpenGVLab remote-code）：用 teacher-forcing 计算 logprob 矩阵
+        for i in tqdm(range(N), desc="Scoring templates", leave=False):
+            row = []
+            prompt_i = build_prompt_func(templates[i])(question, choices)
+            for j in range(N):
+                row.append(vqa_model.model.logprob_of_response(image=image, prompt=prompt_i, response=responses[j]))
+            logprob_matrix.append(row)
     elif use_qwen_style:
         from qwen_vl_utils import process_vision_info
 

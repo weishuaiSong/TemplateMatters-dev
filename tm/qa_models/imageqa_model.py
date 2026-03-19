@@ -610,6 +610,18 @@ class InternVLChat(QAModelInstance):
         self.tokenizer = AutoTokenizer.from_pretrained(ckpt, trust_remote_code=True, use_fast=False)
         self._max_num = 12 if ("InternVL2" in ckpt or "InternVL3" in ckpt) else 6
 
+        # 从 tokenizer 里推断 image special tokens（避免源码里 <img> 标签被平台吞掉）
+        specials = getattr(self.tokenizer, "additional_special_tokens", []) or []
+        def _pick(substrs):
+            for t in specials:
+                s = str(t)
+                if any(sub in s.lower() for sub in substrs):
+                    return s
+            return None
+        self._img_start_token = _pick(["img_start", "image_start", "<img>"]) or "<img>"
+        self._img_end_token = _pick(["img_end", "image_end", "</img>"]) or "</img>"
+        self._img_context_token = _pick(["img_context", "image_context", "img_patch", "<img_context>"]) or "<IMG_CONTEXT>"
+
         # 兼容部分环境下 InternLM2ForCausalLM 缺少 generate() 的问题：
         # OpenGVLab 的 remote code 在 chat() 内部会调用 self.language_model.generate(...)
         # 若 transformers 版本/基类不含该方法，这里动态绑定 GenerationMixin.generate。
@@ -639,6 +651,73 @@ class InternVLChat(QAModelInstance):
         response = self.model.chat(
             self.tokenizer, pixel_values, prompt, generation_config)
         return response, 0
+
+    def _build_internvl_query(self, question: str, num_patches: int) -> str:
+        # 复刻 OpenGVLab InternVLChatModel.chat 的 prompt 逻辑：用对话模板 + 用 image token 串替换第一个 <image>
+        template = self.model.conv_template.copy()
+        template.system_message = getattr(self.model, "system_message", template.system_message)
+        template.append_message(template.roles[0], question)
+        template.append_message(template.roles[1], None)
+        query = template.get_prompt()
+        image_tokens = self._img_start_token + (self._img_context_token * self.model.num_image_token * num_patches) + self._img_end_token
+        # 只替换第一个 <image> 占位符
+        if "<image>" in query:
+            return query.replace("<image>", image_tokens, 1)
+        return query
+
+    @torch.no_grad()
+    def logprob_of_response(self, image, prompt: str, response: str) -> float:
+        # 用 teacher-forcing 方式计算 response 在给定 prompt+image 下的 logprob
+        if isinstance(image, Image.Image):
+            with tempfile.NamedTemporaryFile(delete=True, suffix=".png") as tmp:
+                image.save(tmp.name)
+                image_path = tmp.name
+                pixel_values = load_image(image_path, max_num=self._max_num).to(torch.bfloat16).cuda()
+        else:
+            pixel_values = load_image(image, max_num=self._max_num).to(torch.bfloat16).cuda()
+
+        question = "<image>\n" + prompt
+        query_prompt = self._build_internvl_query(question, num_patches=pixel_values.shape[0])
+        # prompt_len：只含 prompt（assistant 为空）到输入 token 长度
+        prompt_inputs = self.tokenizer(query_prompt, return_tensors="pt")
+        prompt_input_ids = prompt_inputs["input_ids"].to(self.model.device)
+        prompt_attn = prompt_inputs["attention_mask"].to(self.model.device)
+
+        # full：把 response 文本接在 query_prompt 后面（不再追加额外角色标签，保持与模型 prompt 一致）
+        full_text = query_prompt + (response.strip() if response is not None else "")
+        full_inputs = self.tokenizer(full_text, return_tensors="pt")
+        input_ids = full_inputs["input_ids"].to(self.model.device)
+        attention_mask = full_inputs["attention_mask"].to(self.model.device)
+
+        # 计算 inputs_embeds 并注入 vit embeds（复刻 InternVLChatModel.generate）
+        vit_embeds = self.model.extract_feature(pixel_values.to(self.model.device))
+        input_embeds = self.model.language_model.get_input_embeddings()(input_ids)
+        B, N, C = input_embeds.shape
+        flat_embeds = input_embeds.reshape(B * N, C)
+        flat_ids = input_ids.reshape(B * N)
+        selected = (flat_ids == self.model.img_context_token_id)
+        if selected.sum() == 0:
+            raise ValueError("No image context tokens found in input_ids; cannot score InternVL response.")
+        flat_embeds[selected] = vit_embeds.reshape(-1, C).to(flat_embeds.device)
+        input_embeds = flat_embeds.reshape(B, N, C)
+
+        outputs = self.model.language_model(
+            inputs_embeds=input_embeds,
+            attention_mask=attention_mask,
+            return_dict=True,
+        )
+        logits = outputs.logits[0]
+        log_probs = torch.log_softmax(logits, dim=-1)
+
+        prompt_length = prompt_input_ids.shape[1]
+        seq_len = input_ids.shape[1]
+        total = 0.0
+        for k in range(seq_len - prompt_length):
+            pred_pos = prompt_length + k - 1
+            tok_pos = prompt_length + k
+            tok_id = input_ids[0, tok_pos].item()
+            total += log_probs[pred_pos, tok_id].item()
+        return total
 
 
 class InternVLHF(QAModelInstance):
