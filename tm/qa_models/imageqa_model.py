@@ -824,16 +824,21 @@ class LlavaOnevision(QAModelInstance):
 
 
 class LLaVAOneVision15(QAModelInstance):
-    """LLaVA-OneVision-1.5 模型，使用 qwen_vl_utils.process_vision_info（Qwen 风格）。"""
+    """LLaVA-OneVision-1.5 模型，使用 qwen_vl_utils.process_vision_info（Qwen 风格）。
+    该模型 preprocessor_config 指定 Qwen2_5_VLProcessor，但仓库无 processor 类。
+    使用 Qwen2.5-VL 的 processor，并将其 tokenizer 替换为模型自带的（词表一致）。"""
     def __init__(
         self,
         ckpt="lmms-lab/LLaVA-OneVision-1.5-8B-Instruct",
         torch_device="cuda",
         model_precision=torch.bfloat16,
     ):
-        from transformers import AutoProcessor, AutoModelForCausalLM
+        from transformers import AutoProcessor, AutoTokenizer, AutoModelForCausalLM
 
-        self.processor = AutoProcessor.from_pretrained(ckpt, trust_remote_code=True)
+        # 使用 Qwen2.5-VL processor（preprocessor_config 指定 Qwen2_5_VLProcessor）
+        self.processor = AutoProcessor.from_pretrained("Qwen/Qwen2.5-VL-7B-Instruct", trust_remote_code=True)
+        # 替换为模型自带的 tokenizer，确保词表与模型一致
+        self.processor.tokenizer = AutoTokenizer.from_pretrained(ckpt, trust_remote_code=True)
         self.model = AutoModelForCausalLM.from_pretrained(
             ckpt,
             torch_dtype=model_precision,
