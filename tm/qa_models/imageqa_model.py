@@ -849,6 +849,7 @@ class LLaVAOneVision15(QAModelInstance):
             image_processor=image_processor,
             tokenizer=tokenizer,
             video_processor=qwen_processor.video_processor,
+            chat_template=qwen_processor.chat_template,
         )
         self.model = AutoModelForCausalLM.from_pretrained(
             ckpt,
