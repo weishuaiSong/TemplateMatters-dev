@@ -835,17 +835,20 @@ class LLaVAOneVision15(QAModelInstance):
     ):
         from transformers import (
             AutoModelForCausalLM,
+            AutoProcessor,
             Qwen2TokenizerFast,
             Qwen2VLImageProcessor,
-            Qwen2_5_VLProcessor,
         )
 
         # 必须使用本模型的 preprocessor_config（temporal_patch_size=1），否则 image tokens 与 features 不匹配
         image_processor = Qwen2VLImageProcessor.from_pretrained(ckpt)
         tokenizer = Qwen2TokenizerFast.from_pretrained(ckpt)
-        self.processor = Qwen2_5_VLProcessor(
+        # video_processor 从 Qwen 获取（图像 QA 不用视频，仅满足 Processor 构造要求）
+        qwen_processor = AutoProcessor.from_pretrained("Qwen/Qwen2.5-VL-7B-Instruct", trust_remote_code=True)
+        self.processor = type(qwen_processor)(
             image_processor=image_processor,
             tokenizer=tokenizer,
+            video_processor=qwen_processor.video_processor,
         )
         self.model = AutoModelForCausalLM.from_pretrained(
             ckpt,
