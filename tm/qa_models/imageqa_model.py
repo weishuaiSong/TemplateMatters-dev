@@ -833,12 +833,20 @@ class LLaVAOneVision15(QAModelInstance):
         torch_device="cuda",
         model_precision=torch.bfloat16,
     ):
-        from transformers import AutoProcessor, AutoModelForCausalLM, Qwen2TokenizerFast
+        from transformers import (
+            AutoModelForCausalLM,
+            Qwen2TokenizerFast,
+            Qwen2VLImageProcessor,
+            Qwen2_5_VLProcessor,
+        )
 
-        # 使用 Qwen2.5-VL processor（preprocessor_config 指定 Qwen2_5_VLProcessor）
-        self.processor = AutoProcessor.from_pretrained("Qwen/Qwen2.5-VL-7B-Instruct", trust_remote_code=True)
-        # 模型有 tokenizer.json，需用 Fast 版；AutoTokenizer 无法识别 Llavaonevision1_5Config
-        self.processor.tokenizer = Qwen2TokenizerFast.from_pretrained(ckpt)
+        # 必须使用本模型的 preprocessor_config（temporal_patch_size=1），否则 image tokens 与 features 不匹配
+        image_processor = Qwen2VLImageProcessor.from_pretrained(ckpt)
+        tokenizer = Qwen2TokenizerFast.from_pretrained(ckpt)
+        self.processor = Qwen2_5_VLProcessor(
+            image_processor=image_processor,
+            tokenizer=tokenizer,
+        )
         self.model = AutoModelForCausalLM.from_pretrained(
             ckpt,
             torch_dtype=model_precision,
