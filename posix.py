@@ -1,6 +1,7 @@
 import json
 from tqdm import tqdm
 from tm.qa_models import ImageQAModel, build_prompt_func
+from tm.qa_models.imageqa_model import _molmo_process_batch_to_model
 from tm.qa_datasets import SingleImageQADataset
 from pathlib import Path
 import argparse
@@ -146,21 +147,20 @@ for item in tqdm(dataset, desc="Processing dataset"):
         # Molmo 7B-D：processor.process(images, text)，teacher-forcing 计算 logprob
         processor = vqa_model.model.processor
         model = vqa_model.model.model
-        _device = next(model.parameters()).device
         molmo_image = image.convert("RGB") if hasattr(image, "mode") and image.mode != "RGB" else image
 
         for i in tqdm(range(N), desc="Scoring templates", leave=False):
             row = []
             prompt_i = build_prompt_func(templates[i])(question, choices)
             prompt_inputs = processor.process(images=[molmo_image], text=prompt_i)
-            prompt_inputs = {k: (v.to(_device).unsqueeze(0) if v is not None else v) for k, v in prompt_inputs.items()}
+            prompt_inputs = _molmo_process_batch_to_model(model, prompt_inputs)
             prompt_length = prompt_inputs["input_ids"].shape[1]
 
             for j in range(N):
                 response_j = responses[j].strip()
                 full_text = prompt_i + response_j
                 inputs = processor.process(images=[molmo_image], text=full_text)
-                inputs = {k: (v.to(_device).unsqueeze(0) if v is not None else v) for k, v in inputs.items()}
+                inputs = _molmo_process_batch_to_model(model, inputs)
                 seq_len = inputs["input_ids"].shape[1]
                 if seq_len <= prompt_length:
                     print("WARNING: no response tokens detected! prompt_len:", prompt_length, "full_len:", seq_len)

@@ -945,6 +945,27 @@ class Molmo2(QAModelInstance):
         return answer, 1
 
 
+def _molmo_skip_hf_dynamic_cache(cls):
+    """供 MolmoForCausalLM 覆盖：不使用 generate 预置的 DynamicCache（见类内说明）。"""
+    return False
+
+
+def _molmo_process_batch_to_model(model, batch: dict):
+    """processor.process 常为 float32 图像；模型为 bf16/fp16 时需对齐 dtype，否则 ViT Linear 会报错。"""
+    device = next(model.parameters()).device
+    dtype = next(model.parameters()).dtype
+    out = {}
+    for k, v in batch.items():
+        if v is None:
+            out[k] = None
+            continue
+        t = v.to(device).unsqueeze(0)
+        if t.is_floating_point():
+            t = t.to(dtype)
+        out[k] = t
+    return out
+
+
 class Molmo(QAModelInstance):
     """Molmo 7B-D 视觉语言模型，使用 processor.process(images, text) + generate_from_batch。"""
     def __init__(
@@ -965,6 +986,13 @@ class Molmo(QAModelInstance):
             torch_dtype=model_precision,
             trust_remote_code=True,
         ).eval()
+        # transformers 4.4x+ 会在 generate 里预置 DynamicCache；Molmo remote 的 forward 按 legacy KV
+        # 解析 past_key_values[0][0]，空 DynamicCache 会导致 None.size 报错。声明不支持默认 DynamicCache，
+        # 使 _prepare_cache_for_generation 不注入 Cache，首步为 None，后续由模型返回的 tuple KV 驱动。
+        m_cls = self.model.__class__
+        if not getattr(m_cls, "_tm_molmo_dynamic_cache_patched", False):
+            m_cls._supports_default_dynamic_cache = classmethod(_molmo_skip_hf_dynamic_cache)
+            m_cls._tm_molmo_dynamic_cache_patched = True
         self.model.generation_config = GenerationConfig.from_pretrained(
             ckpt, trust_remote_code=True
         )
@@ -976,7 +1004,7 @@ class Molmo(QAModelInstance):
             images=[image],
             text=prompt,
         )
-        inputs = {k: v.to(self.model.device).unsqueeze(0) for k, v in inputs.items()}
+        inputs = _molmo_process_batch_to_model(self.model, inputs)
         gen_config = self.model.generation_config
         gen_config.max_new_tokens = 512
         gen_config.use_cache = True
