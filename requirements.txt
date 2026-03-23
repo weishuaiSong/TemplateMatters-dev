@@ -15,4 +15,4 @@ sentence_transformers
 torch
 torchvision
 tqdm
-transformers>=4.53.1,<4.54
+transformers==4.57.1

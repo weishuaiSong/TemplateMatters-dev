@@ -105,7 +105,8 @@ for item in tqdm(dataset, desc="Processing dataset"):
                             {"type": "text", "text": prompt_i},
                         ],
                     },
-                    {"role": "assistant", "content": response_j},
+                    # apply_chat_template 要求 content 为带 type 的块列表；纯字符串会被按字符迭代导致 TypeError
+                    {"role": "assistant", "content": [{"type": "text", "text": response_j}]},
                 ]
                 inputs = processor.apply_chat_template(
                     messages_full,
