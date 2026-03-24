@@ -191,7 +191,7 @@ for item in tqdm(dataset, desc="Processing dataset"):
                             {"type": "text", "text": prompt_i},
                         ],
                     },
-                    {"role": "assistant", "content": response_j},
+                    {"role": "assistant", "content": [{"type": "text", "text": response_j}]},
                 ]
                 inputs = processor.apply_chat_template(
                     messages_full,
