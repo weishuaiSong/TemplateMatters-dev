@@ -15,6 +15,8 @@ INTERNVL_STYLE_MODELS = {"internvl-chat-v1.5", "internvl2.5-8b", "internvl3-8b",
 MOLMO_STYLE_MODELS = {"molmo-7b-d-0924"}
 # LLaVA-OneVision Qwen2：使用 apply_chat_template + processor(images, text)，与 InternVL HF 类似的 tokenize 路径
 LLAVA_ONEVISION_STYLE_MODELS = {"llava-onevision-qwen2-7b-ov-hf"}
+# GLM-4.6V-Flash：AutoProcessor.apply_chat_template（与官方 README 一致），POSIX 用 teacher-forcing 算 logprob 矩阵
+GLM4V_STYLE_MODELS = {"glm-4.6v-flash"}
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--model_name", type=str, default="llavav1.5-7b", help="Model name to load")
@@ -37,6 +39,7 @@ use_qwen_style = args.model_name in QWEN_STYLE_MODELS
 use_internvl_style = args.model_name in INTERNVL_STYLE_MODELS
 use_molmo_style = args.model_name in MOLMO_STYLE_MODELS
 use_llava_onevision_style = args.model_name in LLAVA_ONEVISION_STYLE_MODELS
+use_glm4v_style = args.model_name in GLM4V_STYLE_MODELS
 
 for item in tqdm(dataset, desc="Processing dataset"):
     question = item["question"]
@@ -142,6 +145,82 @@ for item in tqdm(dataset, desc="Processing dataset"):
             prompt_i = build_prompt_func(templates[i])(question, choices)
             for j in range(N):
                 row.append(vqa_model.model.logprob_of_response(image=image, prompt=prompt_i, response=responses[j]))
+            logprob_matrix.append(row)
+    elif use_glm4v_style:
+        # GLM-4.6V-Flash：apply_chat_template + Glm4vForConditionalGeneration forward
+        processor = vqa_model.model.processor
+        model = vqa_model.model.model
+        _device = next(model.parameters()).device
+        _dtype = next(model.parameters()).dtype
+        _ctkw = {"enable_thinking": False}
+
+        for i in tqdm(range(N), desc="Scoring templates", leave=False):
+            row = []
+            prompt_i = build_prompt_func(templates[i])(question, choices)
+            messages_prompt = [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image", "image": image},
+                        {"type": "text", "text": prompt_i},
+                    ],
+                }
+            ]
+            prompt_inputs = processor.apply_chat_template(
+                messages_prompt,
+                add_generation_prompt=True,
+                tokenize=True,
+                return_dict=True,
+                return_tensors="pt",
+                chat_template_kwargs=_ctkw,
+            )
+            prompt_inputs = {k: v for k, v in prompt_inputs.items() if v is not None}
+            prompt_inputs.pop("token_type_ids", None)
+            prompt_inputs = {k: v.to(_device) if v is not None else v for k, v in prompt_inputs.items()}
+            if "pixel_values" in prompt_inputs and prompt_inputs["pixel_values"] is not None:
+                prompt_inputs["pixel_values"] = prompt_inputs["pixel_values"].to(_dtype)
+            prompt_length = prompt_inputs["input_ids"].shape[1]
+
+            for j in range(N):
+                response_j = responses[j].strip()
+                messages_full = [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "image", "image": image},
+                            {"type": "text", "text": prompt_i},
+                        ],
+                    },
+                    {"role": "assistant", "content": response_j},
+                ]
+                inputs = processor.apply_chat_template(
+                    messages_full,
+                    add_generation_prompt=False,
+                    tokenize=True,
+                    return_dict=True,
+                    return_tensors="pt",
+                    chat_template_kwargs=_ctkw,
+                )
+                inputs = {k: v for k, v in inputs.items() if v is not None}
+                inputs.pop("token_type_ids", None)
+                inputs = {k: v.to(_device) if v is not None else v for k, v in inputs.items()}
+                if "pixel_values" in inputs and inputs["pixel_values"] is not None:
+                    inputs["pixel_values"] = inputs["pixel_values"].to(_dtype)
+                seq_len = inputs["input_ids"].shape[1]
+                if seq_len <= prompt_length:
+                    print("WARNING: no response tokens detected! prompt_len:", prompt_length, "full_len:", seq_len)
+
+                model_kwargs = {k: v for k, v in inputs.items() if v is not None}
+                with torch.no_grad():
+                    outputs = model(**model_kwargs)
+                log_probs = torch.log_softmax(outputs.logits, dim=-1)[0]
+                total_log_prob = 0.0
+                for k in range(seq_len - prompt_length):
+                    pred_pos = prompt_length + k - 1
+                    token_pos = prompt_length + k
+                    token_id = inputs["input_ids"][0, token_pos].item()
+                    total_log_prob += log_probs[pred_pos, token_id].item()
+                row.append(total_log_prob)
             logprob_matrix.append(row)
     elif use_molmo_style:
         # Molmo 7B-D：processor.process(images, text)，teacher-forcing 计算 logprob

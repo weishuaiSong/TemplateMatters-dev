@@ -30,6 +30,7 @@ imageqa_models = {
     "molmo2-8b": ("Molmo2", "allenai/Molmo2-8B"),
     "llava-onevision-qwen2-7b-ov-hf": ("LlavaOnevision", "llava-hf/llava-onevision-qwen2-7b-ov-hf"),
     "llava-onevision-1.5-8b-instruct": ("LLaVAOneVision15", "lmms-lab/LLaVA-OneVision-1.5-8B-Instruct"),
+    "glm-4.6v-flash": ("GLM46VFlash", "zai-org/GLM-4.6V-Flash"),
 
     "llavav1.5-7b-10-templated": ('LLaVA', "/mnt/ali-sh-1/usr/tusen/tmp-dev/shijian/template-scaling/LLaVA/checkpoints/hf_models/llava-v1.5-7b-lora-10-templated"),
     "llavav1.5-7b-100-templated": ('LLaVA', "shijianS01/llava-v1.5-7b-lora-100-templated"),
@@ -505,6 +506,63 @@ class Qwen3VL(QAModelInstance):
 
         return answer, 1
 
+
+class GLM46VFlash(QAModelInstance):
+    """GLM-4.6V-Flash：transformers 官方 Glm4vForConditionalGeneration + AutoProcessor。"""
+
+    def __init__(
+        self,
+        ckpt="zai-org/GLM-4.6V-Flash",
+        torch_device="cuda",
+        model_precision=torch.bfloat16,
+        use_flash_attention=True,
+    ):
+        from transformers import AutoProcessor, Glm4vForConditionalGeneration
+
+        self.processor = AutoProcessor.from_pretrained(ckpt, trust_remote_code=True)
+
+        model_kwargs = {
+            "torch_dtype": model_precision,
+            "device_map": torch_device,
+            "trust_remote_code": True,
+        }
+        if use_flash_attention and model_precision in (torch.float16, torch.bfloat16):
+            model_kwargs["attn_implementation"] = "flash_attention_2"
+
+        self.model = Glm4vForConditionalGeneration.from_pretrained(ckpt, **model_kwargs).eval()
+
+    def qa(self, image, prompt):
+        if isinstance(image, str):
+            image = Image.open(image).convert("RGB")
+
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": image},
+                    {"type": "text", "text": prompt},
+                ],
+            }
+        ]
+        inputs = self.processor.apply_chat_template(
+            messages,
+            tokenize=True,
+            add_generation_prompt=True,
+            return_dict=True,
+            return_tensors="pt",
+            chat_template_kwargs={"enable_thinking": False},
+        )
+        inputs.pop("token_type_ids", None)
+        _device = self.model.device
+        inputs = inputs.to(_device)
+
+        generated_ids = self.model.generate(**inputs, max_new_tokens=512, do_sample=False)
+        input_len = inputs["input_ids"].shape[1]
+        answer = self.processor.decode(
+            generated_ids[0][input_len:],
+            skip_special_tokens=True,
+        ).strip()
+        return answer, 1
 
 
 class QwenVLChat(QAModelInstance):
